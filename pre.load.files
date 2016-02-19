@@ -1,0 +1,39 @@
+
+pre.load.files<-function(chr, which_files){
+
+if(which_files == 1){
+print("RNA-seq")
+rnaseqfile<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/DLPFC.ensembl.KNOWN_AND_SVA.ADJUSTED.VOOM_NORMALIZED.GE.WEIGHTED_RESIDUALS.tsv", header=T, sep='')
+return(rnaseqfile)
+}
+
+if (which_files ==2 ){
+print("VCF")
+vcf_file<-read.delim(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_Imputed.nAlts.vcf",chr), header=T, sep='')
+return(vcf_file)
+}
+
+if(which_files ==3 ){
+print("gencode")
+gencode<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/genfile_eQTLS_cond", header=F, sep='')
+return(gencode)
+}
+
+if(which_files==4){
+print("RNA-seq")
+rnaseqfile<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/DLPFC.ensembl.KNOWN_AND_SVA.ADJUSTED.VOOM_NORMALIZED.GE.WEIGHTED_RESIDUALS.tsv", header=T, sep='')
+
+print("VCF")
+vcf_file<-read.delim(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_Imputed.nAlts.vcf",chr), header=T, sep='')
+print("gencode")
+gencode<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/genfile_eQTLS_cond", header=F, sep='')
+
+output<-vector(3, mode="list")
+
+output[[1]]<-rnaseqfile
+output[[2]]<-vcf_file
+output[[3]]<-gencode
+return(output)
+}
+
+}
