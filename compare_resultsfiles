@@ -1,0 +1,6 @@
+awk '{print FILENAME ":" $0}' GLMNET_Results_maf_* > one massive file
+
+# Get just the relevant columns
+awk '{print  $1, $2, $6, $5, " " FILENAME}' GLMNET*_Results_maf_* | sed 's/_Results//g' | sed 's/_alpha0.5//g' | grep -v NA | sort -k1 > All_results
+
+awk '{if ($4>=0.01) print $0}' All_results > Sig_results'

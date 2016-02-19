@@ -1,0 +1,58 @@
+####script file found in /nas40t2/hwheeler/PrediXcan_CV/GTEx_2014-06013_release/
+####by Heather E. Wheeler 20140602####
+args <- commandArgs(trailingOnly=T)
+date <- Sys.Date()
+"%&%" = function(a,b) paste(a,b,sep="")
+
+###############################################
+### Directories & Variables
+
+my.dir <- "/sc/orga/projects/CommonMind/lhuckins/prediXcan_files"
+
+k <- 10 ### k-fold CV
+n <- 10 #number of k-fold CV replicates
+gencodefile <- args[1]
+gencodeset <- args[2]
+
+################################################
+### Functions & Libraries
+
+library(SNPRelate)
+library(glmnet)
+
+stderr <- function(x) sqrt(var(x,na.rm=TRUE)/length(x))
+lower <- function(x) quantile(x,0.025,na.rm=TRUE)
+upper <- function(x) quantile(x,0.975,na.rm=TRUE)
+
+## convenience function to select best lambda over cv bootstraps for model linear by Keston edited by Heather to get predicted values
+glmnet.select <- function(response, covariates, nrep.set = 10, nfold.set = 10, alpha.set = 0.5, ...) {
+require(glmnet)
+best.lam.sim = vector()
+best.cvm.sim = vector()
+pred.matrix = matrix(0,nrow=dim(covariates)[1],ncol=nrep.set)
+for (i in 1:nrep.set) {
+glmnet.fit = cv.glmnet(covariates, response, nfolds = nfold.set, alpha = alpha.set, keep = TRUE)
+new.df = data.frame(glmnet.fit$cvm, glmnet.fit$lambda, glmnet.fit$glmnet.fit$df, 1:length(glmnet.fit$lambda))
+best.lam = new.df[which.min(new.df[,1]),] # needs to be min or max depending on cv measure (MSE min, AUC max, ...)
+cvm.best = best.lam[,1]
+nrow.max = best.lam[,4]
+best.lam.sim[i] = nrow.max
+best.cvm.sim[i] = cvm.best
+pred.matrix[,i] = glmnet.fit$fit.preval[,nrow.max]
+}
+cvm.avg = mean(best.cvm.sim) # average cvm
+nrow.max = as.integer(mean(best.lam.sim)) # best lambda over cv bootstraps
+ret <- as.data.frame(glmnet.fit$glmnet.fit$beta[,nrow.max])
+ret[ret == 0.0] <- NA
+ret.vec = as.vector(ret[which(!is.na(ret)),]) # vector of non-zero betas
+names(ret.vec) = rownames(ret)[which(!is.na(ret))]
+min.lambda <- glmnet.fit$glmnet.fit$lambda[nrow.max]
+pred.avg <- rowMeans(pred.matrix)
+output = list(ret.vec, cvm.avg, nrow.max, min.lambda, pred.matrix)
+gc()
+return(output)
+}
+
+
+
+

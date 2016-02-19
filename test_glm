@@ -1,0 +1,246 @@
+test.glm<-function(chr, maf, quick, write.res, max_only, rnaseqfile, vcf_file, gencode){
+
+
+print("You have selected the following parameters:")
+print("CHR: ")
+print(chr)
+print("Lower maf cut-off")
+print(maf)
+if(quick==1){
+print("A quick run-through: 50 genes only")
+}
+if(write.res==0){
+print("Resultfiles will not be stored")
+} else {
+print("Resultfiles will be stored in CHR*_outfiles/")
+print("Betas will be in CHR*_outfiles/betas")
+}
+
+
+if(dim(rnaseqfile)[1]==0){
+print("Reading RNA-seq data...")
+
+rnaseqfile<-read.delim("/sc/orga/projects/CommonMind/data/FROM_CORE/Production/FPKMCounts/CMC.Phase1_624.Known.Ensembl.genes.txt", header=T, sep='')
+
+print("Read!")
+}
+
+genes<-rnaseqfile[,1]
+samples<-colnames(rnaseqfile)
+expdata <- as.matrix(rnaseqfile[,-(1)])
+rownames(expdata)<-genes
+expdata<-t(expdata)
+dim(expdata)
+
+print("Reading Gencode data...")
+
+gencode<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/genfile_eQTLS_cond", header=F, sep='')
+
+print("Read!")
+
+
+rownames(gencode) <- gencode[,9]
+
+gencode<-gencode[which(gencode[,1]==sprintf("chr%s", chr)),]
+
+rm1<-which(is.na(gencode[,10]))
+rm2<-which(is.na(gencode[,11]))
+rm<-c(rm1,rm2)
+rm<-unique(rm)
+gencode<-gencode[-(rm),]
+
+no.eqtl.number<-length(rm1)
+one.eqtl.only<-length(rm2)
+
+
+# get overlap genes between gencodefile and rnaseqfile
+
+explist<-intersect(genes, gencode[,9])
+
+gencode<-gencode[explist,]
+expdata<-expdata[,explist]
+
+# get compatible names.
+
+samples.names<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/SVA.Samples.ids.update", header=F, sep='')
+rownames(expdata)<-samples.names[,1]
+
+# remove non-caucasian ids
+samples.remove<-read.delim("/sc/orga/projects/CommonMind/lhuckins/non-caucasian.ids", header=T, sep='')
+
+rm<-which(rownames(expdata) %in% samples.remove[,1])
+expdata<-expdata[-(rm),]
+
+samples.names<-rownames(expdata)
+
+###input genotype data###
+
+if(dim(vcf_file)[1]==0){
+print("Reading VCF file...")
+
+vcf_file<-read.delim(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_Imputed.nAlts.vcf",chr), header=T, sep='')
+
+print("Read!")
+}
+# only keep overlapping samples
+
+use.samples<-intersect(samples.names, colnames(vcf_file))
+expdata<-expdata[use.samples,]
+use.samples2<-c(colnames(vcf_file)[1:9], use.samples)
+
+vcf_file<-vcf_file[,use.samples2]
+rownames(vcf_file)<-vcf_file[,3]
+
+### Now get the overlap between the files
+
+X<-vcf_file[,-(1:9)]
+X <- t(X)
+
+###create results array
+resultsarray <- array(0,c(length(explist),7))
+dimnames(resultsarray)[[1]] <- explist
+dimnames(resultsarray)[[2]] <- c("gene","mean.cvm","mean.lambda.iteration","lambda.min","n.snps","R2","pval")
+
+
+###run LASSO CV
+
+if (maf %in% c(0,1,5)){
+
+print("Selecting SNPs within MAF limit...")
+print(maf)
+
+if(maf==5){
+
+Imputed.frqs5<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Imputed.all.freq.low5pc", header=F, sep='')
+above5<-colnames(X)[-(which(colnames(X) %in% Imputed.frqs5[,2]))]
+X<-X[,above5]
+} else if (maf==1){
+Imputed.frqs1<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Imputed.all.freq.low1pc", header=F, sep='')
+above1<-colnames(X)[-(which(colnames(X) %in% Imputed.frqs1[,2]))]
+X<-X[,above1]
+}
+
+set.seed(1001)
+
+if(quick==1){
+length.run<-50
+
+print("Selected quick run so testing first 50 genes...")
+
+}else{
+length.run<-length(explist)
+
+print("Selected full run so testing all genes...")
+}
+
+rsq.list<-1:length.run
+rsq.list<-rsq.list*0
+
+for(i in 1:length.run){
+
+#cat(i,"/",length.run,"\n")
+gene <- explist[i]
+geneinfo <- gencode[gene,]
+
+cissnps.names<-unique(geneinfo[,10:25]) # This will do max + cond; to do max, just pull field 10 and skip unique()
+cissnps.names<-as.matrix(cissnps.names[-(which(is.na(cissnps.names)))])
+
+if (length(intersect(cissnps.names, colnames(X)))>=1){
+
+cisgenos <- X[,intersect(cissnps.names, colnames(X))]
+
+cisgenos[cisgenos==10]<-NA
+
+cisgenos <- scale(cisgenos, center=T, scale=T)
+cisgenos[is.na(cisgenos)] <- 0
+
+exppheno<-expdata[,gene]
+exppheno <- scale(exppheno, center=T, scale=T)  ###need to scale for fastLmPure to work properly
+exppheno[is.na(exppheno)] <- 0
+
+k=10
+size.folds<-floor(dim(exppheno)[1]/k) # set size of groups. Round down so we don't get overlap.
+rsq<-0
+
+for(fold in 1:k){   # carry out k-fold cv
+test<-(fold*size.folds)
+test.st<-1+test-size.folds
+cv <- glm(exppheno[-(test.st:test),] ~ cisgenos[-(test.st:test),]) ###run lasso k-fold CV n times to determine best lambda & betas
+
+nb<-which(is.na(cv$coefficients))
+
+if(length(nb)>0){
+cv$coefficients[nb]<-0
+}
+
+
+if(length(cv$coefficients)==2){
+out.tmp<-(cv$coefficients[1] + (cisgenos[test.st:test,]*cv$coefficients[-(1)]))
+} else {
+out.tmp<-rowSums(cv$coefficients[1] + (cisgenos[test.st:test,]*cv$coefficients[-(1)]))
+}
+
+rsq.tmp<-(cor.test(out.tmp, exppheno[test.st:test,])$estimate)^2
+rsq<-c(rsq, rsq.tmp)
+}
+
+rsq.list[i]<-mean(rsq[-(1)])
+
+genename <- as.character(gencode[gene,6])
+resultsarray[gene,1] <- genename
+resultsarray[gene,2] <- rsq.list[i]
+resultsarray[gene,3] <- min(rsq[-(1)])
+resultsarray[gene,4] <- min(rsq[-(1)])
+
+}
+}
+
+if(write.res==1){
+
+if(max_only==1){
+write.table(resultsarray, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/GLM_Results_maf_%s_alpha0.5_maxonly",chr, maf), quote=F)
+}
+if(max_only==0){
+write.table(resultsarray, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/GLM_Results_maf_%s_alpha0.5_maxcond",chr, maf), quote=F)
+}
+
+
+}
+
+
+### Summary file
+
+summary.file<-array(0, dim=c(7,2))
+summary.file[,1]<-c("REGR", "MAF_lower", "NSNPs", "NGenes_0_eQTL", "NGenes_tested", "NGenes_R2_g0.01", "NGenes_R2_l0.01")
+summary.file[1,2]<-"GLM"
+summary.file[2,2]<-maf
+summary.file[3,2]<-dim(X)[2]
+summary.file[4,2]<-no.eqtl.number
+summary.file[5,2]<-length(explist)
+summary.file[6,2]<-length(which(resultsarray[,2]>=0.01))
+summary.file[7,2]<-length(which(resultsarray[,2]<0.01))
+
+
+if(write.res==1){
+
+if(max_only==1){
+write.table(summary.file, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_GLM_Summary_maf_%s_alpha0.5_maxonly",chr,maf), quote=F)
+
+
+
+} else {
+write.table(summary.file, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_GLM_Summary_maf_%s_alpha0.5_maxcond",chr,maf), quote=F)
+
+
+
+}
+
+}
+
+}
+
+
+output<-summary.file
+return(output)
+}
+

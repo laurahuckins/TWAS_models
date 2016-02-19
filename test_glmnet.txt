@@ -1,0 +1,500 @@
+
+test.glmnet<-function(chr, maf, quick, write.res, rnaseqfile, vcf_file, gencode){
+
+print("You have selected the following parameters:")
+print("CHR: ")
+print(chr)
+print("Lower maf cut-off")
+print(maf)
+if(quick==1){
+print("A quick run-through: 50 genes only")
+}
+if(write.res==0){
+print("Resultfiles will not be stored")
+} else {
+print("Resultfiles will be stored in CHR*_outfiles/")
+print("Betas will be in CHR*_outfiles/betas")
+}
+
+
+if(dim(rnaseqfile)[1]==0){
+print("Reading RNA-seq data...")
+
+rnaseqfile<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/DLPFC.ensembl.KNOWN_AND_SVA.ADJUSTED.VOOM_NORMALIZED.GE.WEIGHTED_RESIDUALS.tsv", header=T, sep='')
+
+print("Read!")
+}
+
+genes<-rnaseqfile[,1]
+samples<-colnames(rnaseqfile)
+expdata <- as.matrix(rnaseqfile[,-(1)])
+rownames(expdata)<-genes
+expdata<-t(expdata)
+dim(expdata)
+
+print("Reading Gencode data...")
+
+gencode<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/genfile_eQTLS_cond", header=F, sep='')
+
+print("Read!")
+
+
+rownames(gencode) <- gencode[,9]
+
+gencode<-gencode[which(gencode[,1]==sprintf("chr%s", chr)),]
+
+rm1<-which(is.na(gencode[,10]))
+rm2<-which(is.na(gencode[,11]))
+rm<-c(rm1,rm2)
+rm<-unique(rm)
+gencode<-gencode[-(rm),]
+
+no.eqtl.number<-length(rm1)
+one.eqtl.only<-length(rm2)
+
+
+# get overlap genes between gencodefile and rnaseqfile
+
+explist<-intersect(genes, gencode[,9])
+
+gencode<-gencode[explist,]
+expdata<-expdata[,explist]
+
+# get compatible names.
+
+samples.names<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/SVA.Samples.ids.update", header=F, sep='')
+rownames(expdata)<-samples.names[,1]
+
+# remove non-caucasian ids
+samples.remove<-read.delim("/sc/orga/projects/CommonMind/lhuckins/non-caucasian.ids", header=T, sep='')
+
+rm<-which(rownames(expdata) %in% samples.remove[,1])
+expdata<-expdata[-(rm),]
+
+samples.names<-rownames(expdata)
+
+###input genotype data###
+
+if(dim(vcf_file)[1]==0){
+print("Reading VCF file...")
+
+vcf_file<-read.delim(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_Imputed.nAlts.vcf",chr), header=T, sep='')
+
+print("Read!")
+}
+# only keep overlapping samples
+
+use.samples<-intersect(samples.names, colnames(vcf_file))
+expdata<-expdata[use.samples,]
+use.samples2<-c(colnames(vcf_file)[1:9], use.samples)
+
+vcf_file<-vcf_file[,use.samples2]
+rownames(vcf_file)<-vcf_file[,3]
+
+### Now get the overlap between the files
+
+X<-vcf_file[,-(1:9)]
+X <- t(X)
+
+###create results array
+resultsarray <- array(0,c(length(explist),7))
+dimnames(resultsarray)[[1]] <- explist
+dimnames(resultsarray)[[2]] <- c("gene","mean.cvm","mean.lambda.iteration","lambda.min","n.snps","R2","pval")
+
+###run LASSO CV
+
+if (maf %in% c(0,1,5)){
+
+print("Selecting SNPs within MAF limit...")
+print(maf)
+
+if(maf==5){
+
+Imputed.frqs5<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Imputed.all.freq.low5pc", header=F, sep='')
+above5<-colnames(X)[-(which(colnames(X) %in% Imputed.frqs5[,2]))]
+X<-X[,above5]
+} else if (maf==1){
+Imputed.frqs1<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Imputed.all.freq.low1pc", header=F, sep='')
+above1<-colnames(X)[-(which(colnames(X) %in% Imputed.frqs1[,2]))]
+X<-X[,above1]
+}
+
+set.seed(1001)
+
+if(quick==1){
+length.run<-50
+
+print("Selected quick run so testing first 50 genes...")
+
+}else{
+length.run<-length(explist)
+
+print("Selected full run so testing all genes...")
+}
+
+
+for(i in 1:length.run){
+
+cat(i,"/",length.run,"\n")
+gene <- explist[i]
+geneinfo <- gencode[gene,]
+
+cissnps.names<-unique(geneinfo[,10:25]) # This will do max + cond; to do max, just pull field 10 and skip unique()
+cissnps.names<-as.matrix(cissnps.names[-(which(is.na(cissnps.names)))])
+
+if (length(intersect(cissnps.names, colnames(X)))>=2){
+
+cisgenos <- X[,intersect(cissnps.names, colnames(X))]
+
+cisgenos[cisgenos==10]<-NA
+
+cisgenos <- scale(cisgenos, center=T, scale=T)
+cisgenos[is.na(cisgenos)] <- 0
+
+exppheno<-expdata[,gene]
+exppheno <- scale(exppheno, center=T, scale=T)  ###need to scale for fastLmPure to work properly
+exppheno[is.na(exppheno)] <- 0
+
+cv <- glmnet.select(exppheno,cisgenos,nrep.set=n,nfold.set=k,alpha.set=0.5) ###run lasso k-fold CV n times to determine best lambda & betas
+
+bestbetas <- cv[[1]] ###how many SNPs in best predictor?
+
+if(length(bestbetas) > 0){
+pred.lasso <- cv[[5]] ###mean k-fold CV predictions from n reps, this gives predictions of gene expr
+
+### calculate correlation between predicted and observed expression
+res <- summary(lm(exppheno~pred.lasso))
+genename <- as.character(gencode[gene,6])
+resultsarray[gene,1] <- genename
+resultsarray[gene,2] <- cv[[2]] ###add mean minimum cvm (cross-validated mean-squared error) to results
+resultsarray[gene,3] <- cv[[3]] ###add mean of best lambda iteration to results
+resultsarray[gene,4] <- cv[[4]] ###add best lambda to results
+resultsarray[gene,5] <- length(bestbetas) ###add #snps in prediction to results
+resultsarray[gene,6] <- res$r.squared ###lm R2
+resultsarray[gene,7] <- res$coefficients[2,4] ###lm p-value
+
+
+### output bestbetas for PrediXcan
+bestbetalist <- names(bestbetas)
+bestbetainfo <- vcf_file[bestbetalist,1:5]
+betatable<-as.matrix(cbind(bestbetainfo,bestbetas))
+betafile<-cbind(betatable[,3],betatable[,5],betatable[,6])
+colnames(betafile) <- c("SNP","eff.allele","beta")
+
+if(write.res==1){
+write.table(betafile, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/betas/GLMNET_Gene_%s_maf_%s_alpha0.5_maxcond", chr, genename, maf), quote=F,row.names=F,sep="\t")
+}
+}else{
+genename <- as.character(gencode[gene,6])
+resultsarray[gene,1] <- genename
+resultsarray[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+}
+
+
+} else {
+genename <- as.character(gencode[gene,6])
+resultsarray[gene,1] <- genename
+resultsarray[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+resultsarray[gene,2] <- "NOSNPs"
+
+}
+
+}
+
+
+#### Make some nice output files
+
+if(write.res==1){
+
+write.table(resultsarray, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/GLMNET_Results_maf_%s_alpha0.5_maxcond",chr, maf), quote=F)
+
+}
+
+### adapt parts of results file:
+
+nosnps<-which(resultsarray[,2]=="NOSNPs")
+
+
+### Summary file
+
+summary.file<-array(0, dim=c(8,2))
+summary.file[,1]<-c("REGR", "MAF_lower", "ALPHA", "NSNPs", "NGenes_0_eQTL", "NGenes_1_eQTL", "NGenes_tested", "NGenes_R2_g0.01")
+summary.file[1,2]<-"GLMNET"
+summary.file[2,2]<-maf
+summary.file[3,2]<-0.5
+summary.file[4,2]<-dim(X)[2]
+summary.file[5,2]<-no.eqtl.number+ length(nosnps)
+summary.file[6,2]<-one.eqtl.only
+summary.file[7,2]<-length(explist)-length(nosnps)
+summary.file[8,2]<-length(which(resultsarray[-(nosnps),6]>=0.01))
+
+if(write.res==1){
+
+write.table(summary.file, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_GLMNET_Summary_maf_%s_alpha0.5_maxcond",chr,maf), quote=F)
+
+
+h1<-hist(as.numeric(resultsarray[-(nosnps),6]), 100)
+
+pdf(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/Hist_GLMNET_maf_%s_alpha0.5_maxcond.pdf", chr,maf))
+plot(h1, bty='n', xlab="R2", main=sprintf("Chr7, R2, Maf = %s", maf), col="royalblue", xlim=c(0,max(h1$mids)))
+abline(v=0.01, lty=3)
+dev.off()
+
+resultsarray[which(is.na(resultsarray[,6])),6]<-0
+d1<-density(as.numeric(resultsarray[-(nosnps),6]))
+
+pdf(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/Density_GLMNET_maf_%s_alpha0.5_maxcond.pdf", chr, maf))
+plot(d1, frame=F, xlab="R2", main=sprintf("Chr7, R2, Maf = %s", maf), col="royalblue", lwd=3)
+abline(v=0.01, lty=3)
+dev.off()
+}
+
+output<-summary.file
+return(output)
+
+}
+
+if (maf==10){
+print("Preparing three files: maf>0, maf>1%, maf>5%")
+
+Imputed.frqs1<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Imputed.all.freq.low1pc", header=F, sep='')
+above1<-colnames(X)[-(which(colnames(X) %in% Imputed.frqs1[,2]))]
+
+Imputed.frqs5<-read.delim("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Imputed.all.freq.low5pc", header=F, sep='')
+above5<-colnames(X)[-(which(colnames(X) %in% Imputed.frqs5[,2]))]
+
+X.all<-X
+X.5<-X[,above5]
+X.1<-X[,above1]
+
+
+resultsarray0 <- array(0,c(length(explist),7))
+dimnames(resultsarray0)[[1]] <- explist
+dimnames(resultsarray0)[[2]] <- c("gene","mean.cvm","mean.lambda.iteration","lambda.min","n.snps","R2","pval")
+
+resultsarray1 <- array(0,c(length(explist),7))
+dimnames(resultsarray1)[[1]] <- explist
+dimnames(resultsarray1)[[2]] <- c("gene","mean.cvm","mean.lambda.iteration","lambda.min","n.snps","R2","pval")
+
+resultsarray5 <- array(0,c(length(explist),7))
+dimnames(resultsarray5)[[1]] <- explist
+dimnames(resultsarray5)[[2]] <- c("gene","mean.cvm","mean.lambda.iteration","lambda.min","n.snps","R2","pval")
+
+if(quick==1){
+length.run<-50
+
+print("Selected quick run so testing first 50 genes...")
+
+}else{
+length.run<-length(explist)
+
+print("Selected full run so testing all genes...")
+}
+
+
+for(i in 1:length.run){
+cat(i,"/",length.run,"\n")
+gene <- explist[i]
+geneinfo <- gencode[gene,]
+
+cissnps.names<-unique(geneinfo[,10:25]) # This will do max + cond; to do max, just pull field 10 and skip unique()
+cissnps.names<-as.matrix(cissnps.names[-(which(is.na(cissnps.names)))])
+
+if (length(intersect(cissnps.names, colnames(X.all)))>=2){
+
+cisgenos0 <- X.all[,intersect(cissnps.names, colnames(X.all))]
+
+cisgenos0[cisgenos==10]<-NA
+
+cisgenos0 <- scale(cisgenos0, center=T, scale=T)
+cisgenos0[is.na(cisgenos)] <- 0
+
+
+exppheno<-expdata[,gene]
+exppheno <- scale(exppheno, center=T, scale=T)  ###need to scale for fastLmPure to work properly
+exppheno[is.na(exppheno)] <- 0
+
+if(dim(cisgenos0)[2]>1){
+
+cv0 <- glmnet.select(exppheno,cisgenos0,nrep.set=n,nfold.set=k,alpha.set=0.5) ###run lasso k-fold CV n times to determine best lambda & betas
+bestbetas0 <- cv0[[1]] ###how many SNPs in best predictor?
+if(length(bestbetas0) > 0){
+pred.lasso <- cv0[[5]] ###mean k-fold CV predictions from n reps, this gives predictions of gene expr
+
+### calculate correlation between predicted and observed expression
+res <- summary(lm(exppheno~pred.lasso))
+genename <- as.character(gencode[gene,6])
+resultsarray0[gene,1] <- genename
+resultsarray0[gene,2] <- cv0[[2]] ###add mean minimum cvm (cross-validated mean-squared error) to results
+resultsarray0[gene,3] <- cv0[[3]] ###add mean of best lambda iteration to results
+resultsarray0[gene,4] <- cv0[[4]] ###add best lambda to results
+resultsarray0[gene,5] <- length(bestbetas0) ###add #snps in prediction to results
+resultsarray0[gene,6] <- res$r.squared ###lm R2
+resultsarray0[gene,7] <- res$coefficients[2,4] ###lm p-value
+
+### output bestbetas for PrediXcan
+}else{
+genename <- as.character(gencode[gene,6])
+resultsarray0[gene,1] <- genename
+resultsarray0[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+}
+
+}
+} else {
+genename <- as.character(gencode[gene,6])
+resultsarray0[gene,1] <- genename
+resultsarray0[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+resultsarray0[gene,2] <- "NOSNPs"
+}
+
+
+
+if (length(intersect(cissnps.names, colnames(X.1)))>=2){
+
+cisgenos1 <- X.1[,intersect(cissnps.names, colnames(X.1))]
+
+cisgenos1[cisgenos==10]<-NA
+
+cisgenos1 <- scale(cisgenos1, center=T, scale=T)
+cisgenos1[is.na(cisgenos)] <- 0
+
+
+if(dim(cisgenos1)[2]>1){
+
+cv1 <- glmnet.select(exppheno,cisgenos1,nrep.set=n,nfold.set=k,alpha.set=0.5) ###run lasso k-fold CV n times to determine best lambda & betas
+bestbetas1 <- cv1[[1]] ###how many SNPs in best predictor?
+
+if(length(bestbetas1) > 0){
+pred.lasso <- cv1[[5]] ###mean k-fold CV predictions from n reps, this gives predictions of gene expr
+
+### calculate correlation between predicted and observed expression
+res <- summary(lm(exppheno~pred.lasso))
+genename <- as.character(gencode[gene,6])
+resultsarray1[gene,1] <- genename
+resultsarray1[gene,2] <- cv1[[2]] ###add mean minimum cvm (cross-validated mean-squared error) to results
+resultsarray1[gene,3] <- cv1[[3]] ###add mean of best lambda iteration to results
+resultsarray1[gene,4] <- cv1[[4]] ###add best lambda to results
+resultsarray1[gene,5] <- length(bestbetas1) ###add #snps in prediction to results
+resultsarray1[gene,6] <- res$r.squared ###lm R2
+resultsarray1[gene,7] <- res$coefficients[2,4] ###lm p-value
+
+### output bestbetas for PrediXcan
+}else{
+genename <- as.character(gencode[gene,6])
+resultsarray1[gene,1] <- genename
+resultsarray1[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+}
+
+
+}
+} else {
+
+genename <- as.character(gencode[gene,6])
+resultsarray1[gene,1] <- genename
+resultsarray1[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+resultsarray1[gene,2] <- "NOSNPs"
+
+}
+
+if (length(intersect(cissnps.names, colnames(X.5)))>=2){
+cisgenos5 <- X.5[,intersect(cissnps.names, colnames(X.5))]
+cisgenos5[cisgenos==10]<-NA
+
+cisgenos5 <- scale(cisgenos5, center=T, scale=T)
+cisgenos5[is.na(cisgenos)] <- 0
+
+
+if(dim(cisgenos5)[2]>1){
+
+cv5 <- glmnet.select(exppheno,cisgenos5,nrep.set=n,nfold.set=k,alpha.set=0.5) ###run lasso k-fold CV n times to determine best lambda & betas
+bestbetas5 <- cv5[[1]] ###how many SNPs in best predictor?
+
+if(length(bestbetas5) > 0){
+pred.lasso <- cv5[[5]] ###mean k-fold CV predictions from n reps, this gives predictions of gene expr
+
+### calculate correlation between predicted and observed expression
+res <- summary(lm(exppheno~pred.lasso))
+genename <- as.character(gencode[gene,6])
+resultsarray5[gene,1] <- genename
+resultsarray5[gene,2] <- cv5[[2]] ###add mean minimum cvm (cross-validated mean-squared error) to results
+resultsarray5[gene,3] <- cv5[[3]] ###add mean of best lambda iteration to results
+resultsarray5[gene,4] <- cv5[[4]] ###add best lambda to results
+resultsarray5[gene,5] <- length(bestbetas5) ###add #snps in prediction to results
+resultsarray5[gene,6] <- res$r.squared ###lm R2
+resultsarray5[gene,7] <- res$coefficients[2,4] ###lm p-value
+
+### output bestbetas for PrediXcan
+}else{
+genename <- as.character(gencode[gene,6])
+resultsarray5[gene,1] <- genename
+resultsarray5[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+}
+
+}
+} else {
+genename <- as.character(gencode[gene,6])
+resultsarray5[gene,1] <- genename
+resultsarray5[gene,2:7] <- c(NA,NA,NA,0,NA,NA)
+resultsarray5[gene,2] <- "NOSNPs"
+}
+
+}
+
+#### Make some nice output files
+
+if(write.res==1){
+
+
+write.table(resultsarray0, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/GLMNET_Results_maf_%s_alpha0.5_maxcond",chr, 0), quote=F)
+
+write.table(resultsarray1, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/GLMNET_Results_maf_%s_alpha0.5_maxcond",chr, 1), quote=F)
+
+write.table(resultsarray5, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/GLMNET_Results_maf_%s_alpha0.5_maxcond",chr, 5), quote=F)
+
+}
+### adapt parts of results file:
+
+nosnps<-which(resultsarray[,2]=="NOSNPs")
+
+
+### Summary file
+
+summary.file<-array(0, dim=c(5,4))
+summary.file[,1]<-c("REGR", "MAF_lower", "NSNPs", "NGenes_tested", "NGenes_R2_g0.01")
+summary.file[1,2:4]<-"GLMNET"
+summary.file[2,2:4]<-c(0,1,5)
+summary.file[3,2:4]<-c(dim(X.all)[2], dim(X.1)[2], dim(X.5)[2])
+summary.file[4,2:4]<-c(length(explist),length(explist),length(explist))
+summary.file[5,2:4]<-c(length(which(resultsarray0[-(nosnps),6]>=0.01)),length(which(resultsarray1[-(nosnps),6]>=0.01)),length(which(resultsarray5[-(nosnps),6]>=0.01)))
+
+if(write.res==1){
+write.table(summary.file, sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_GLMNET_Compare_Summary_maf_%s_alpha0.5_maxcond",chr,maf), quote=F)
+
+h1<-hist(as.numeric(resultsarray[-(nosnps),6]), 100)
+
+pdf(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/Hist_GLMNET_maf_%s_alpha0.5_maxcond.pdf", chr,maf))
+plot(h1, bty='n', xlab="R2", main=sprintf("Chr7, R2, Maf = %s", maf), col="royalblue", xlim=c(0,max(h1$mids)))
+abline(v=0.01, lty=3)
+dev.off()
+
+resultsarray[which(is.na(resultsarray[,6])),6]<-0
+d1<-density(as.numeric(resultsarray[-(nosnps),6]))
+
+pdf(sprintf("/sc/orga/projects/CommonMind/lhuckins/prediXcan_files/Chr%s_outputfiles/Density_GLMNET_maf_%s_alpha0.5_maxcond.pdf", chr, maf))
+plot(d1, frame=F, xlab="R2", main=sprintf("Chr7, R2, Maf = %s", maf), col="royalblue", lwd=3)
+abline(v=0.01, lty=3)
+dev.off()
+
+output<-summary.file
+
+}
+return(output)
+}
+
+
+
+
+
+
+
+
